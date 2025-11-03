@@ -5,6 +5,5 @@ st.selectbox('좋아하는 음식을 선택해주세요:',['김치찌개','된�
 if st.button('인사말생성'):
   st.info(menu+'를 좋아하시나봐요! 저도 좋아해요!')
   st.error('반가워요')
- st.balloons()
+  st.balloons()
   
-
