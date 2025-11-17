@@ -6,7 +6,10 @@ st.set_page_config(page_title="Top 10 Subway Stations", layout="wide")
 
 @st.cache_data
 def load_data():
-    return pd.read_csv("../CARD_SUBWAY_MONTH_202510.csv", encoding='utf-8') # 경로 수정 필요 시 변경("CARD_SUBWAY_MONTH_202510.csv")
+    return import os
+base_path = os.path.dirname(__file__)
+file_path = os.path.join(base_path, "..", "CARD_SUBWAY_MONTH_202510.csv")
+return pd.read_csv(file_path, encoding='cp949') # 경로 수정 필요 시 변경("CARD_SUBWAY_MONTH_202510.csv")
 
 df = load_data()
 
