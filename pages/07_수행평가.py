@@ -1,224 +1,165 @@
-# Streamlit 상품 가격 비교 앱 (GitHub-ready)
-
-아래 파일들이 포함되어 있습니다:
-
-* `pages/01_product_prices.py` — Streamlit 페이지(앱 코드). **pages 폴더** 아래에 넣어주세요.
-* `requirements.txt` — 깃허브 / 배포용 의존성 목록.
-* `README.md` — 실행 방법 및 CSV 형식 설명.
-
----
-
-## `pages/01_product_prices.py`
-
-```python
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 from pathlib import Path
+import plotly.graph_objects as go
 
-st.set_page_config(page_title="상품 지역별 가격 비교", layout="wide")
+st.set_page_config(page_title="상품 가격 분석", layout="wide")
 
 @st.cache_data
-def load_csv(path: str):
-    # 읽을 때 유연하게 컬럼명을 처리합니다.
+def load_csv(path: Path):
     df = pd.read_csv(path)
-    # 가능한 컬럼명 후보
-    product_cols = [c for c in df.columns if c.lower() in ("product","상품","item","name")]
-    region_cols = [c for c in df.columns if c.lower() in ("dong","region","area","neighborhood","구","동","지역")]
-    price_cols = [c for c in df.columns if c.lower() in ("price","가격","amount","cost")]
-
-    if not product_cols or not region_cols or not price_cols:
-        raise ValueError(
-            "CSV에 최소한 'product', 'region(dong)', 'price'의 유효한 컬럼이 하나씩 있어야 합니다.\n"
-            f"찾은 컬럼들: products={product_cols}, regions={region_cols}, prices={price_cols}"
-        )
-
-    # 표준 컬럼명으로 변경
-    df = df.rename(columns={product_cols[0]: 'product', region_cols[0]: 'dong', price_cols[0]: 'price'})
-
-    # price 숫자 변환
-    df['price'] = pd.to_numeric(df['price'].astype(str).str.replace(',',''), errors='coerce')
-    df = df.dropna(subset=['price','product','dong'])
     return df
 
+# --- Locate CSV in repository root ---
+# This file lives in the pages/ folder but Streamlit's working directory is
+# usually the repository root. Still we resolve robustly.
+ROOT = Path(__file__).resolve().parents[1]
+CSV_CANDIDATES = [ROOT / "prices.csv", ROOT / "data.csv", ROOT / "prices.csv", ROOT / "dataset.csv", ROOT / "products.csv", ROOT / "prices.csv"]
+CSV_PATH = None
+for p in CSV_CANDIDATES:
+    if p.exists():
+        CSV_PATH = p
+        break
 
-def create_agg(df: pd.DataFrame, product: str):
-    sel = df[df['product'].astype(str) == str(product)].copy()
-    if sel.empty:
-        return pd.DataFrame(columns=['dong','avg_price','count'])
-    agg = (sel.groupby('dong', dropna=False)['price']
-           .agg(['mean','count'])
-           .reset_index()
-           .rename(columns={'mean':'avg_price','count':'count'}))
-    agg = agg.sort_values('avg_price', ascending=True).reset_index(drop=True)
-    return agg
+if CSV_PATH is None:
+    st.error("CSV 파일을 루트 폴더에 넣어주세요. 기본 파일명: prices.csv (또는 data.csv, dataset.csv, products.csv). 또는 코드 상단의 CSV_PATH 변수를 수정하세요.")
+    st.stop()
 
-
-# ---------- 메인 UI ----------
-st.title("📊 상품별 지역(동) 가격 비교")
-st.markdown("CSV 파일은 레포지토리 루트에 두고 `prices.csv` (또는 원하는 파일명)를 사용하세요.")
-
-# CSV 경로 입력(루트에 있다고 가정)
-csv_default = "prices.csv"
-csv_path = st.text_input("CSV 파일 경로 (루트 기준)", value=csv_default)
-
-# 데이터 로드
 try:
-    df = load_csv(csv_path)
+    df = load_csv(CSV_PATH)
 except Exception as e:
-    st.error(f"CSV 로드 오류: {e}")
+    st.error(f"CSV 파일을 불러오는 중 오류가 발생했습니다: {e}")
     st.stop()
 
-products = sorted(df['product'].astype(str).unique())
-if not products:
-    st.warning("CSV에서 상품을 찾을 수 없습니다.")
+# --- Try to normalize column names (handle English/Korean variations) ---
+col_map = {}
+lower_cols = {c.lower(): c for c in df.columns}
+# product column
+for candidate in ["product", "상품", "item", "상품명", "name"]:
+    if candidate in lower_cols:
+        col_map['product'] = lower_cols[candidate]
+        break
+# region column
+for candidate in ["region", "지역", "city", "시도", "시군구"]:
+    if candidate in lower_cols:
+        col_map['region'] = lower_cols[candidate]
+        break
+# neighborhood column
+for candidate in ["neighborhood", "동네", "동", "district", "구"]:
+    if candidate in lower_cols:
+        col_map['neighborhood'] = lower_cols[candidate]
+        break
+# price column
+for candidate in ["price", "가격", "cost", "단가"]:
+    if candidate in lower_cols:
+        col_map['price'] = lower_cols[candidate]
+        break
+
+required = ['product', 'neighborhood', 'price']
+if not all(k in col_map for k in required):
+    st.error("CSV에 필요한 열이 없습니다. 최소한 'product(상품)', 'neighborhood(동/동네)', 'price(가격)' 열이 필요합니다. 열 이름 예: product, neighborhood, price 또는 상품, 동, 가격")
+    st.write("현재 발견된 열:", list(df.columns))
     st.stop()
 
-col1, col2 = st.columns([3,1])
-with col1:
-    selected_product = st.selectbox("상품 선택", products)
-with col2:
-    st.write("\n")
-    st.write("\n")
-    st.write("🔎 선택된 상품:")
-    st.metric("상품", selected_product)
+# Rename for internal use
+df = df.rename(columns={col_map['product']: 'product', col_map['neighborhood']: 'neighborhood', col_map['price']: 'price'})
+if 'region' in col_map:
+    df = df.rename(columns={col_map['region']: 'region'})
+else:
+    df['region'] = "(region 없음)"
 
-agg = create_agg(df, selected_product)
-if agg.empty:
-    st.info("선택된 상품의 데이터가 없습니다.")
+# Ensure numeric prices
+df['price'] = pd.to_numeric(df['price'], errors='coerce')
+
+st.title("📊 상품별 지역 가격 비교")
+st.markdown("상품을 선택하면 동네별 가격을 그래프로 보여주고, 가장 싼 동네와 가장 비싼 동네를 강조합니다.")
+
+# Sidebar controls
+with st.sidebar:
+    st.header("설정")
+    product_list = sorted(df['product'].dropna().unique())
+    selected_product = st.selectbox("상품 선택", product_list)
+    agg_method = st.radio("집계 방식", ("평균 (mean)", "중앙값 (median)", "최저값 (min)"), index=0)
+    show_table = st.checkbox("원본 데이터 테이블 보기", value=False)
+    top_n = st.number_input("상위/하위 몇 개 동네 표시?", min_value=1, max_value=50, value=10)
+
+# Filter
+prod_df = df[df['product'] == selected_product].copy()
+if prod_df.empty:
+    st.warning("선택한 상품에 데이터가 없습니다.")
     st.stop()
 
-# 최저/최고 동
-min_row = agg.loc[agg['avg_price'].idxmin()]
-max_row = agg.loc[agg['avg_price'].idxmax()]
+# Aggregate by neighborhood
+if agg_method.startswith("평균"):
+    agg = prod_df.groupby(['region', 'neighborhood'], dropna=False)['price'].mean().reset_index()
+elif agg_method.startswith("중앙값"):
+    agg = prod_df.groupby(['region', 'neighborhood'], dropna=False)['price'].median().reset_index()
+else:
+    agg = prod_df.groupby(['region', 'neighborhood'], dropna=False)['price'].min().reset_index()
 
-st.info(f"가장 싼 동: **{min_row['dong']}** — 평균가 {min_row['avg_price']:.0f}원 (표본 {int(min_row['count'])})")
-st.info(f"가장 비싼 동: **{max_row['dong']}** — 평균가 {max_row['avg_price']:.0f}원 (표본 {int(max_row['count'])})")
+agg = agg.dropna(subset=['price'])
+agg = agg.sort_values('price', ascending=False)
 
-# 차트 (막대)
+# Identify extreme neighborhoods
+most_expensive = agg.iloc[0]
+cheapest = agg.iloc[-1]
+
+# Plot
 fig = go.Figure()
+colors = []
+for idx, row in agg.iterrows():
+    if row['neighborhood'] == most_expensive['neighborhood'] and row['region'] == most_expensive['region']:
+        colors.append('red')
+    elif row['neighborhood'] == cheapest['neighborhood'] and row['region'] == cheapest['region']:
+        colors.append('green')
+    else:
+        colors.append('lightslategray')
 
-# 기본 바 (회색)
 fig.add_trace(go.Bar(
-    x=agg['dong'],
-    y=agg['avg_price'],
-    name='평균가격',
-    marker_color='lightgray',
-    hovertemplate='<b>%{x}</b><br>평균가: %{y:.0f}원<br>샘플: %{customdata}',
-    customdata=agg['count']
+    x=agg['neighborhood'].astype(str) + " (" + agg['region'].astype(str) + ")",
+    y=agg['price'],
+    marker_color=colors,
+    hovertemplate='%{x}<br>가격: %{y}<extra></extra>'
 ))
-
-# min, max 강조 (다른 색)
-fig.add_trace(go.Bar(
-    x=[min_row['dong']],
-    y=[min_row['avg_price']],
-    name='최저가 동',
-    marker_color='green',
-    hovertemplate='<b>%{x}</b><br>평균가: %{y:.0f}원',
-))
-fig.add_trace(go.Bar(
-    x=[max_row['dong']],
-    y=[max_row['avg_price']],
-    name='최고가 동',
-    marker_color='red',
-    hovertemplate='<b>%{x}</b><br>평균가: %{y:.0f}원',
-))
-
-fig.update_layout(
-    title=f"'{selected_product}'의 동별 평균 가격",
-    xaxis_title='동',
-    yaxis_title='평균 가격 (원)',
-    barmode='overlay',
-    bargap=0.2,
-    height=550,
-    template='simple_white'
-)
+fig.update_layout(title=f"{selected_product} — 동네별 가격 ({agg_method})", xaxis_title="동네 (지역)", yaxis_title="가격", margin=dict(t=50, b=200), height=600)
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 데이터테이블
-with st.expander("데이터 보기 (동별 평균)"):
-    st.dataframe(agg.style.format({'avg_price':'{:.0f}'}))
+# Show metrics
+col1, col2 = st.columns(2)
+col1.metric("가장 비싼 동네", f"{most_expensive['neighborhood']} ({most_expensive['region']})", f"{most_expensive['price']:.2f}")
+col2.metric("가장 싼 동네", f"{cheapest['neighborhood']} ({cheapest['region']})", f"{cheapest['price']:.2f}")
 
-# 다운로드 버튼: 동별 평균 csv
+# Show top/bottom tables
+st.subheader("상위/하위 동네")
+left, right = st.columns(2)
+with left:
+    st.write(f"상위 {top_n} (비싼)")
+    st.dataframe(agg.head(top_n).reset_index(drop=True))
+with right:
+    st.write(f"하위 {top_n} (싼)")
+    st.dataframe(agg.tail(top_n).reset_index(drop=True))
+
+if show_table:
+    st.subheader("필터된 원본 데이터")
+    st.dataframe(prod_df)
+
+# Download aggregated results
 csv_bytes = agg.to_csv(index=False).encode('utf-8')
-st.download_button("동별 평균 CSV 다운로드", data=csv_bytes, file_name=f"{selected_product}_dong_avg.csv", mime='text/csv')
+st.download_button(label="Aggregated CSV 다운로드", data=csv_bytes, file_name=f"{selected_product}_aggregated.csv", mime='text/csv')
 
-# 맨 아래에 간단한 도움말
 st.markdown("---")
-st.markdown("**CSV 파일 예시 컬럼명(허용)**: `product`(또는 product/name/상품), `dong`(또는 region/area/지역/동), `price`(또는 price/가격/amount).\nCSV는 레포지토리 루트에 위치시키세요.\n")
-```
+st.markdown("### 사용 팁")
+st.markdown("- CSV 파일은 루트 폴더에 `prices.csv` (또는 `data.csv`, `dataset.csv`, `products.csv`)로 넣어주세요.\n- 열 이름이 다르면 코드 상단의 `CSV_CANDIDATES` 또는 컬럼 매핑 부분을 수정하세요.\n- 이 파일을 GitHub에 올릴 때는 `pages/01_product_price_analysis.py` 경로를 유지하면 Streamlit Cloud 등에서 자동으로 페이지로 인식됩니다.")
 
----
+# Requirements block (copy into requirements.txt)
+# --- BEGIN REQUIREMENTS ---
+# streamlit
+# pandas
+# plotly
+# numpy
+# --- END REQUIREMENTS ---
 
-## `requirements.txt`
+# End of file
 
-```
-streamlit>=1.24
-pandas>=1.5
-plotly>=5.0
-```
-
----
-
-## `README.md`
-
-```md
-# Streamlit 상품 지역별 가격 비교 앱
-
-## 파일 구조 (권장)
-```
-
-project-root/
-├─ pages/
-│  └─ 01_product_prices.py
-├─ prices.csv      # 루트에 위치한 CSV
-├─ requirements.txt
-└─ README.md
-
-```
-
-### CSV 형식
-CSV는 세 가지 핵심 컬럼을 필요로 합니다 (컬럼명은 약간 다르게 적혀 있어도 인식합니다):
-- `product` (또는 `상품`, `item`, `name`) — 상품 이름
-- `dong` (또는 `region`, `area`, `지역`) — 동/구 수준의 지역 이름
-- `price` (또는 `가격`, `amount`) — 가격 (숫자)
-
-예시 행:
-```
-
-product,dong,price
-사과,중구 1동,1200
-사과,중구 1동,1300
-바나나,서구 2동,900
-
-```
-
-### 실행 방법
-1. 가상환경 생성
-```
-
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-```
-2. 루트에 `prices.csv`를 넣고
-```
-
-streamlit run pages/01_product_prices.py
-
-```
-
-### 깃허브에 올릴 때
-- `pages/01_product_prices.py` 파일을 그대로 올리고 `prices.csv`는 개인정보/대용량이 아니라면 함께 올리거나 `data/` 폴더로 분리하세요.
-```
-
-```
-
----
-
-앱 코드와 요구사항을 `pages/01_product_prices.py`, `requirements.txt`, `README.md`로 포함해 두었습니다. 필요하면 UI 문구(한국어/영어), 차트 색상 변경, 또는 CSV 컬럼명 규칙을 더 엄격하게 적용하도록 코드를 수정해 드릴게요.
-
-```
