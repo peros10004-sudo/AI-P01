@@ -1,165 +1,132 @@
+# pages/price_by_region.py
 import streamlit as st
 import pandas as pd
-import numpy as np
-from pathlib import Path
-import plotly.graph_objects as go
+import altair as alt
 
-st.set_page_config(page_title="상품 가격 분석", layout="wide")
+st.set_page_config(page_title="지역별 가격 비교", layout="wide")
+
+st.title("상품별 지역 가격 비교")
+st.markdown("`pp.csv` (루트)에 있는 데이터를 사용합니다. 상품을 선택하면 동네별 가격을 그래프로 보여주고, 가장 싼/비싼 동네를 표시합니다.")
 
 @st.cache_data
-def load_csv(path: Path):
-    df = pd.read_csv(path)
-    return df
+def load_data(path="pp.csv"):
+    # 인코딩 문제를 대비해 여러 인코딩 시도
+    encodings = ["cp949", "euc-kr", "utf-8-sig", "utf-8", "latin1"]
+    for e in encodings:
+        try:
+            df = pd.read_csv(path, encoding=e)
+            return df, e
+        except Exception:
+            continue
+    raise ValueError(f"파일을 읽을 수 없습니다. 시도한 인코딩: {encodings}")
 
-# --- Locate CSV in repository root ---
-# This file lives in the pages/ folder but Streamlit's working directory is
-# usually the repository root. Still we resolve robustly.
-ROOT = Path(__file__).resolve().parents[1]
-CSV_CANDIDATES = [ROOT / "prices.csv", ROOT / "data.csv", ROOT / "prices.csv", ROOT / "dataset.csv", ROOT / "products.csv", ROOT / "prices.csv"]
-CSV_PATH = None
-for p in CSV_CANDIDATES:
-    if p.exists():
-        CSV_PATH = p
-        break
+df, used_encoding = load_data("pp.csv")
+st.caption(f"데이터 로드: {used_encoding} 인코딩 사용")
 
-if CSV_PATH is None:
-    st.error("CSV 파일을 루트 폴더에 넣어주세요. 기본 파일명: prices.csv (또는 data.csv, dataset.csv, products.csv). 또는 코드 상단의 CSV_PATH 변수를 수정하세요.")
+# 기본 컬럼 이름 추출
+all_cols = list(df.columns)
+# 보통 앞쪽에 '품목', '조사기준', '구평균가격' 같은 컬럼이 있으므로 제외하고 동네 컬럼만 선택
+non_region_cols = {"품목", "조사기준", "구평균가격"}
+region_cols = [c for c in all_cols if c not in non_region_cols]
+
+if "품목" not in df.columns:
+    st.error("CSV에 '품목' 컬럼이 없습니다. 컬럼명을 확인해주세요.")
     st.stop()
 
-try:
-    df = load_csv(CSV_PATH)
-except Exception as e:
-    st.error(f"CSV 파일을 불러오는 중 오류가 발생했습니다: {e}")
+# 상품 리스트
+products = df["품목"].astype(str).unique().tolist()
+products.sort()
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    selected = st.selectbox("상품 선택", products)
+
+with col2:
+    st.write("데이터 요약")
+    st.write(f"전체 행: {len(df)}")
+    st.write(f"지역(동네) 수: {len(region_cols)}")
+
+# 선택된 상품의 행(들) 필터
+sel_df = df[df["품목"].astype(str) == str(selected)]
+
+if sel_df.empty:
+    st.warning("선택한 상품의 데이터가 없습니다.")
     st.stop()
 
-# --- Try to normalize column names (handle English/Korean variations) ---
-col_map = {}
-lower_cols = {c.lower(): c for c in df.columns}
-# product column
-for candidate in ["product", "상품", "item", "상품명", "name"]:
-    if candidate in lower_cols:
-        col_map['product'] = lower_cols[candidate]
-        break
-# region column
-for candidate in ["region", "지역", "city", "시도", "시군구"]:
-    if candidate in lower_cols:
-        col_map['region'] = lower_cols[candidate]
-        break
-# neighborhood column
-for candidate in ["neighborhood", "동네", "동", "district", "구"]:
-    if candidate in lower_cols:
-        col_map['neighborhood'] = lower_cols[candidate]
-        break
-# price column
-for candidate in ["price", "가격", "cost", "단가"]:
-    if candidate in lower_cols:
-        col_map['price'] = lower_cols[candidate]
-        break
+# 여러 행이 있을 수 있으므로(조사기준 등), 평균을 내거나 첫 행 사용
+# 우선 각 동네별 숫자값으로 변환(문자열에 콤마가 있는 경우 처리)
+def to_numeric_series(s):
+    return pd.to_numeric(s.astype(str).str.replace(",", "").str.strip(), errors="coerce")
 
-required = ['product', 'neighborhood', 'price']
-if not all(k in col_map for k in required):
-    st.error("CSV에 필요한 열이 없습니다. 최소한 'product(상품)', 'neighborhood(동/동네)', 'price(가격)' 열이 필요합니다. 열 이름 예: product, neighborhood, price 또는 상품, 동, 가격")
-    st.write("현재 발견된 열:", list(df.columns))
+# 합치기: 동네별 평균(숫자)
+region_values = {}
+for c in region_cols:
+    vals = to_numeric_series(sel_df[c])
+    # 평균을 사용 (가능하면 single value)
+    region_values[c] = vals.mean(skipna=True)
+
+region_ser = pd.Series(region_values).dropna()
+if region_ser.empty:
+    st.error("동네별 숫자 데이터가 없습니다. CSV 값을 확인하세요.")
     st.stop()
 
-# Rename for internal use
-df = df.rename(columns={col_map['product']: 'product', col_map['neighborhood']: 'neighborhood', col_map['price']: 'price'})
-if 'region' in col_map:
-    df = df.rename(columns={col_map['region']: 'region'})
-else:
-    df['region'] = "(region 없음)"
+# 최저/최고 동네
+min_region = region_ser.idxmin()
+min_price = region_ser.min()
+max_region = region_ser.idxmax()
+max_price = region_ser.max()
 
-# Ensure numeric prices
-df['price'] = pd.to_numeric(df['price'], errors='coerce')
+# 그래프 준비 (Altair)
+chart_df = region_ser.reset_index()
+chart_df.columns = ["dong", "price"]
+chart_df = chart_df.sort_values("price", ascending=False)
 
-st.title("📊 상품별 지역 가격 비교")
-st.markdown("상품을 선택하면 동네별 가격을 그래프로 보여주고, 가장 싼 동네와 가장 비싼 동네를 강조합니다.")
+highlight = alt.selection_single(fields=["dong"], bind="legend", empty="none")
+base = alt.Chart(chart_df).encode(
+    x=alt.X("dong:N", sort="-y", title="동네"),
+    y=alt.Y("price:Q", title="가격"),
+    tooltip=["dong", alt.Tooltip("price", format=",.0f")]
+)
 
-# Sidebar controls
-with st.sidebar:
-    st.header("설정")
-    product_list = sorted(df['product'].dropna().unique())
-    selected_product = st.selectbox("상품 선택", product_list)
-    agg_method = st.radio("집계 방식", ("평균 (mean)", "중앙값 (median)", "최저값 (min)"), index=0)
-    show_table = st.checkbox("원본 데이터 테이블 보기", value=False)
-    top_n = st.number_input("상위/하위 몇 개 동네 표시?", min_value=1, max_value=50, value=10)
+bars = base.mark_bar().encode(
+    color=alt.condition(
+        (alt.datum.dong == min_region) | (alt.datum.dong == max_region),
+        alt.value("#d62728"),  # 강조 색 (altair 기본 색상 사용하지 못하면 색 지정됨)
+        alt.value("#1f77b4")
+    )
+)
 
-# Filter
-prod_df = df[df['product'] == selected_product].copy()
-if prod_df.empty:
-    st.warning("선택한 상품에 데이터가 없습니다.")
-    st.stop()
+text = base.mark_text(
+    dy=-8,
+    size=12
+).encode(
+    text=alt.Text("price:Q", format=",.0f")
+)
 
-# Aggregate by neighborhood
-if agg_method.startswith("평균"):
-    agg = prod_df.groupby(['region', 'neighborhood'], dropna=False)['price'].mean().reset_index()
-elif agg_method.startswith("중앙값"):
-    agg = prod_df.groupby(['region', 'neighborhood'], dropna=False)['price'].median().reset_index()
-else:
-    agg = prod_df.groupby(['region', 'neighborhood'], dropna=False)['price'].min().reset_index()
+st.subheader(f"{selected} — 지역별 가격 (평균 기준)")
+st.altair_chart((bars + text).properties(height=450, width=900), use_container_width=True)
 
-agg = agg.dropna(subset=['price'])
-agg = agg.sort_values('price', ascending=False)
-
-# Identify extreme neighborhoods
-most_expensive = agg.iloc[0]
-cheapest = agg.iloc[-1]
-
-# Plot
-fig = go.Figure()
-colors = []
-for idx, row in agg.iterrows():
-    if row['neighborhood'] == most_expensive['neighborhood'] and row['region'] == most_expensive['region']:
-        colors.append('red')
-    elif row['neighborhood'] == cheapest['neighborhood'] and row['region'] == cheapest['region']:
-        colors.append('green')
-    else:
-        colors.append('lightslategray')
-
-fig.add_trace(go.Bar(
-    x=agg['neighborhood'].astype(str) + " (" + agg['region'].astype(str) + ")",
-    y=agg['price'],
-    marker_color=colors,
-    hovertemplate='%{x}<br>가격: %{y}<extra></extra>'
-))
-fig.update_layout(title=f"{selected_product} — 동네별 가격 ({agg_method})", xaxis_title="동네 (지역)", yaxis_title="가격", margin=dict(t=50, b=200), height=600)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# Show metrics
-col1, col2 = st.columns(2)
-col1.metric("가장 비싼 동네", f"{most_expensive['neighborhood']} ({most_expensive['region']})", f"{most_expensive['price']:.2f}")
-col2.metric("가장 싼 동네", f"{cheapest['neighborhood']} ({cheapest['region']})", f"{cheapest['price']:.2f}")
-
-# Show top/bottom tables
-st.subheader("상위/하위 동네")
-left, right = st.columns(2)
-with left:
-    st.write(f"상위 {top_n} (비싼)")
-    st.dataframe(agg.head(top_n).reset_index(drop=True))
-with right:
-    st.write(f"하위 {top_n} (싼)")
-    st.dataframe(agg.tail(top_n).reset_index(drop=True))
-
-if show_table:
-    st.subheader("필터된 원본 데이터")
-    st.dataframe(prod_df)
-
-# Download aggregated results
-csv_bytes = agg.to_csv(index=False).encode('utf-8')
-st.download_button(label="Aggregated CSV 다운로드", data=csv_bytes, file_name=f"{selected_product}_aggregated.csv", mime='text/csv')
-
+# 정보 박스: 최저/최고 동네
 st.markdown("---")
-st.markdown("### 사용 팁")
-st.markdown("- CSV 파일은 루트 폴더에 `prices.csv` (또는 `data.csv`, `dataset.csv`, `products.csv`)로 넣어주세요.\n- 열 이름이 다르면 코드 상단의 `CSV_CANDIDATES` 또는 컬럼 매핑 부분을 수정하세요.\n- 이 파일을 GitHub에 올릴 때는 `pages/01_product_price_analysis.py` 경로를 유지하면 Streamlit Cloud 등에서 자동으로 페이지로 인식됩니다.")
+col_a, col_b = st.columns(2)
+with col_a:
+    st.metric(label="가장 싼 동네", value=f"{min_region}", delta=f"{int(min_price):,} (원)")
+    st.caption("같은 상품의 해당 동네 가격의 평균값을 사용합니다.")
+with col_b:
+    st.metric(label="가장 비싼 동네", value=f"{max_region}", delta=f"{int(max_price):,} (원)")
+    st.caption("같은 상품의 해당 동네 가격의 평균값을 사용합니다.")
 
-# Requirements block (copy into requirements.txt)
-# --- BEGIN REQUIREMENTS ---
-# streamlit
-# pandas
-# plotly
-# numpy
-# --- END REQUIREMENTS ---
+# 상/하위 표
+st.markdown("### 상/하위 지역 (가격 기준)")
+top_n = 5
+cols = st.columns(2)
+with cols[0]:
+    st.write(f"가장 저렴한 {top_n} 동네")
+    st.table(chart_df.sort_values("price").head(top_n).assign(price=lambda d: d["price"].map(lambda x: f"{int(x):,}")))
+with cols[1]:
+    st.write(f"가장 비싼 {top_n} 동네")
+    st.table(chart_df.head(top_n).assign(price=lambda d: d["price"].map(lambda x: f"{int(x):,}")))
 
-# End of file
-
+st.markdown("**원본 데이터 (선택된 상품의 행)**")
+st.dataframe(sel_df.reset_index(drop=True))
