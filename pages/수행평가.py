@@ -76,4 +76,25 @@ st.plotly_chart(fig2, use_container_width=True)
 st.subheader("⬇️ 집계 데이터 다운로드")
 csv = filtered.to_csv(index=False).encode('utf-8-sig')
 st.download_button("CSV 다운로드", csv, "지역별_품목별_가격집계.csv", "text/csv")
+import os
+
+def get_csv_path():
+    # 1) Streamlit Cloud 기본 경로 (최상위 폴더)
+    path1 = "수행.csv"
+    # 2) 로컬 개발 환경에서 pages/ 폴더에서 실행할 때
+    path2 = "../수행.csv"
+
+    if os.path.exists(path1):
+        return path1
+    elif os.path.exists(path2):
+        return path2
+    else:
+        st.error("❌ 수행.csv 파일을 찾을 수 없습니다.")
+        return None
+
+DATA_PATH = get_csv_path()
+
+@st.cache_data
+def load_data(path):
+    return pd.read_csv(path, encoding="utf-8-sig")
 
